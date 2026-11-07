@@ -1,0 +1,15 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+### Credenciales y wallet de Oracle: nunca a git ###
+.env
+wallet/
+Wallet_*/
+
+### IDEs ###
+.idea
+*.iml
+.vscode/
+.classpath
+.project
+.settings
