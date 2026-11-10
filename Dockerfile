@@ -13,14 +13,18 @@ RUN ./mvnw -q -B clean package -DskipTests
 FROM eclipse-temurin:21-jre
 
 WORKDIR /app
-RUN useradd --system --no-create-home appuser
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home appuser \
+    && mkdir -p /app/wallet \
+    && chown appuser:appuser /app/wallet
 COPY --from=build /app/target/pet-api-0.0.1-SNAPSHOT.jar /app/pet-api.jar
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# El wallet de Oracle NO va dentro de la imagen: se monta en /app/wallet al ejecutar
-# y DB_URL apunta ahi con TNS_ADMIN=/app/wallet. Las credenciales llegan por variables
-# de entorno (DB_URL, DB_USERNAME, DB_PASSWORD, CORS_ORIGINS).
 ENV TNS_ADMIN=/app/wallet
+RUN chmod 0555 /app/docker-entrypoint.sh
 USER appuser
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-jar", "/app/pet-api.jar"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

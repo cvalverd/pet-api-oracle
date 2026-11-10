@@ -39,6 +39,21 @@ jobs:
         run: |
           sed -i 's/\r$//' mvnw
           chmod +x mvnw
+          sh -n docker-entrypoint.sh
+          test_dir="$(mktemp -d)"
+          mkdir -p "$test_dir/input" "$test_dir/bin" "$test_dir/extracted"
+          printf 'wallet-test\n' > "$test_dir/input/tnsnames.ora"
+          (cd "$test_dir/input" && zip -q "$test_dir/wallet.zip" tnsnames.ora)
+          cat > "$test_dir/bin/java" <<'EOF'
+          #!/bin/sh
+          test -s "$TNS_ADMIN/tnsnames.ora"
+          test -z "${ORACLE_WALLET_BASE64:-}"
+          EOF
+          chmod +x "$test_dir/bin/java"
+          PATH="$test_dir/bin:$PATH" \
+            TNS_ADMIN="$test_dir/extracted" \
+            ORACLE_WALLET_BASE64="$(base64 --wrap=0 "$test_dir/wallet.zip")" \
+            ./docker-entrypoint.sh
           ./mvnw -B test
 
       - name: Configure AWS credentials

@@ -90,6 +90,16 @@ Configura en **Settings → Secrets and variables → Actions** de este reposito
 frontend no se comparten automáticamente. Como las credenciales de AWS Academy expiran, actualiza
 los tres secretos cada vez que roten.
 
-Este workflow solo publica la imagen: no crea ni inicia tareas ECS. La API requiere el wallet de
-Oracle y las variables `DB_URL`, `DB_USERNAME` y `DB_PASSWORD` en tiempo de ejecución; no se incluyen
-en la imagen y deben configurarse de forma segura antes de desplegar el servicio.
+El workflow solo publica la imagen: no crea ni inicia tareas ECS. La API requiere el wallet de
+Oracle y las variables `DB_URL`, `DB_USERNAME` y `DB_PASSWORD` en tiempo de ejecución. ECS debe
+inyectar `ORACLE_WALLET_BASE64` desde AWS Secrets Manager; el entrypoint decodifica el ZIP en
+`/app/wallet`, valida `tnsnames.ora`, elimina el valor Base64 del entorno y luego inicia Java. Ni la
+wallet ni las credenciales se incluyen en la imagen.
+
+Para desplegarla en ECS, publica primero una imagen después de estos cambios y ejecuta el workflow
+manual **Deploy Pet API to ECS** en el repositorio del frontend. Este espera los secretos
+`pet-api/oracle-db-credentials` (JSON con `DB_URL`, `DB_USERNAME` y `DB_PASSWORD`) y
+`pet-api/oracle-wallet` (ZIP de wallet codificado en Base64) en Secrets Manager, región `us-east-1`.
+La plantilla no incluye valores secretos y el preflight consulta únicamente los metadatos de los
+secretos. La API queda pública, sin autenticación, detrás de CloudFront HTTPS; úsala solo para la
+demo hasta agregar autenticación y controles de acceso.
