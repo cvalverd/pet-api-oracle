@@ -77,3 +77,19 @@ La API queda en `http://localhost:8080/pets`. Luego levanta el frontend Angular 
 
 19 pruebas (controller con MockMvc, service con Mockito y modelo); no necesitan la base de datos.
 JaCoCo deja el reporte en `target/site/jacoco/index.html` (98% de cobertura de instrucciones).
+
+## Publicar la imagen en Amazon ECR
+
+El workflow de GitHub Actions `.github/workflows/publish-ecr.yml` ejecuta las pruebas y, al hacer
+push a `main` (o iniciarlo manualmente en esa rama), construye la imagen Docker y la publica en
+`622519216316.dkr.ecr.us-east-1.amazonaws.com/pet-api-oracle` con el SHA del commit como etiqueta.
+La primera ejecución crea el repositorio ECR si aún no existe.
+
+Configura en **Settings → Secrets and variables → Actions** de este repositorio los secretos
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` y `AWS_SESSION_TOKEN`. Los secretos del repositorio del
+frontend no se comparten automáticamente. Como las credenciales de AWS Academy expiran, actualiza
+los tres secretos cada vez que roten.
+
+Este workflow solo publica la imagen: no crea ni inicia tareas ECS. La API requiere el wallet de
+Oracle y las variables `DB_URL`, `DB_USERNAME` y `DB_PASSWORD` en tiempo de ejecución; no se incluyen
+en la imagen y deben configurarse de forma segura antes de desplegar el servicio.
