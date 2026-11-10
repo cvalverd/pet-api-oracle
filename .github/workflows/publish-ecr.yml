@@ -39,6 +39,7 @@ jobs:
         run: |
           sed -i 's/\r$//' mvnw
           chmod +x mvnw
+          chmod +x docker-entrypoint.sh
           sh -n docker-entrypoint.sh
           test_dir="$(mktemp -d)"
           mkdir -p "$test_dir/input" "$test_dir/bin" "$test_dir/extracted"
