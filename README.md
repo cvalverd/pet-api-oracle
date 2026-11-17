@@ -31,7 +31,10 @@ sql/pet.sql   Tabla PET y datos de prueba
 
 1. En la consola de Oracle Cloud, en tu Autonomous Database: **Database connection → Download wallet**.
    Descomprímelo en la carpeta `wallet/` de este proyecto.
-2. Ejecuta `sql/pet.sql` con tu usuario (SQL Developer Web o SQL Developer).
+2. No necesitas crear la tabla manualmente: al iniciar, Flyway aplica las migraciones versionadas de
+   `src/main/resources/db/migration`, crea `PET` e inserta las cuatro mascotas de demostracion. El
+   usuario de la base debe poder crear tablas. `sql/pet.sql` queda como alternativa manual; no la
+   ejecutes si la aplicacion ya aplico las migraciones.
 3. Copia `.env.example` a `.env` y completa `DB_URL`, `DB_USERNAME` y `DB_PASSWORD`. `DB_URL`
    acepta la URL JDBC completa o el alias de servicio (`<servicio>_tp`) que aparece en
    `wallet/tnsnames.ora`; para un alias se usa `TNS_ADMIN` o, si no está definido, `/app/wallet`.
@@ -97,7 +100,9 @@ si es el primer despliegue, ejecuta una vez **Deploy Pet API to ECS** en el repo
 La API requiere el wallet de Oracle y las variables `DB_URL`, `DB_USERNAME` y `DB_PASSWORD` en
 tiempo de ejecución. ECS inyecta las credenciales desde Secrets Manager. Antes de iniciar Spring,
 la aplicación descarga el ZIP privado de S3 mediante el AWS SDK para Java y el task role de ECS,
-valida que contenga `tnsnames.ora` en la raíz y lo extrae en `/app/wallet`. La variable
+valida que contenga `tnsnames.ora` en la raíz y lo extrae en `/app/wallet`. Spring Boot aplica las
+migraciones Flyway antes de inicializar JPA para crear `PET` e insertar los datos de demostracion.
+La variable
 `ORACLE_WALLET_S3_BUCKET` identifica el bucket y `ORACLE_WALLET_S3_KEY` el objeto; no se usan
 credenciales AWS estáticas ni valores Base64. En ejecución local, Docker Compose conserva el montaje
 de `./wallet` y no descarga desde S3 si esas variables no están configuradas.
