@@ -32,9 +32,11 @@ sql/pet.sql   Tabla PET y datos de prueba
 1. En la consola de Oracle Cloud, en tu Autonomous Database: **Database connection → Download wallet**.
    Descomprímelo en la carpeta `wallet/` de este proyecto.
 2. No necesitas crear la tabla manualmente: al iniciar, Flyway aplica las migraciones versionadas de
-   `src/main/resources/db/migration`, crea `PET` e inserta las cuatro mascotas de demostracion. El
-   usuario de la base debe poder crear tablas. `sql/pet.sql` queda como alternativa manual; no la
-   ejecutes si la aplicacion ya aplico las migraciones.
+   `src/main/resources/db/migration`, crea `PET` e inserta las cuatro mascotas de demostracion. Si el
+   esquema ya contiene objetos pero no tiene historial de Flyway, se adopta desde la version 2 y la
+   migracion V3 asegura la tabla e inserta solo las mascotas de demostracion que falten; no elimina ni
+   reemplaza registros existentes. El usuario de la base debe poder crear tablas. `sql/pet.sql` queda
+   como alternativa manual; no la ejecutes si la aplicacion ya aplico las migraciones.
 3. Copia `.env.example` a `.env` y completa `DB_URL`, `DB_USERNAME` y `DB_PASSWORD`. `DB_URL`
    acepta la URL JDBC completa o el alias de servicio (`<servicio>_tp`) que aparece en
    `wallet/tnsnames.ora`; para un alias se usa `TNS_ADMIN` o, si no está definido, `/app/wallet`.

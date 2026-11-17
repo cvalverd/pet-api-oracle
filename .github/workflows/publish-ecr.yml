@@ -16,7 +16,7 @@ concurrency:
 jobs:
   publish:
     name: Test, build and publish API image
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
