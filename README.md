@@ -32,8 +32,9 @@ sql/pet.sql   Tabla PET y datos de prueba
 1. En la consola de Oracle Cloud, en tu Autonomous Database: **Database connection → Download wallet**.
    Descomprímelo en la carpeta `wallet/` de este proyecto.
 2. Ejecuta `sql/pet.sql` con tu usuario (SQL Developer Web o SQL Developer).
-3. Copia `.env.example` a `.env` y completa `DB_URL`, `DB_USERNAME` y `DB_PASSWORD`. El nombre del
-   servicio (`<servicio>_tp`) está en `wallet/tnsnames.ora`.
+3. Copia `.env.example` a `.env` y completa `DB_URL`, `DB_USERNAME` y `DB_PASSWORD`. `DB_URL`
+   acepta la URL JDBC completa o el alias de servicio (`<servicio>_tp`) que aparece en
+   `wallet/tnsnames.ora`; para un alias se usa `TNS_ADMIN` o, si no está definido, `/app/wallet`.
 
 `wallet/` y `.env` están en `.gitignore`: el wallet y la contraseña **no se suben al repositorio**.
 En el ejemplo bdget el wallet quedó commiteado y la contraseña escrita en `docker-compose.yml`; aquí
