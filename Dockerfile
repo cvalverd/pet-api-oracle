@@ -18,7 +18,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home appuser \
     && mkdir -p /app/wallet \
-    && chown appuser:appuser /app/wallet
+    && chown appuser:appuser /app/wallet \
+    && chmod 0700 /app/wallet
 COPY --from=build /app/target/pet-api-0.0.1-SNAPSHOT.jar /app/pet-api.jar
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 

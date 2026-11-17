@@ -42,18 +42,15 @@ jobs:
           chmod +x docker-entrypoint.sh
           sh -n docker-entrypoint.sh
           test_dir="$(mktemp -d)"
-          mkdir -p "$test_dir/input" "$test_dir/bin" "$test_dir/extracted"
-          printf 'wallet-test\n' > "$test_dir/input/tnsnames.ora"
-          (cd "$test_dir/input" && zip -q "$test_dir/wallet.zip" tnsnames.ora)
+          mkdir -p "$test_dir/bin"
           cat > "$test_dir/bin/java" <<'EOF'
           #!/bin/sh
-          test -s "$TNS_ADMIN/tnsnames.ora"
-          test -z "${ORACLE_WALLET_BASE64:-}"
+          test "$#" -eq 2
+          test "$1" = "-jar"
+          test "$2" = "/app/pet-api.jar"
           EOF
           chmod +x "$test_dir/bin/java"
           PATH="$test_dir/bin:$PATH" \
-            TNS_ADMIN="$test_dir/extracted" \
-            ORACLE_WALLET_BASE64="$(base64 --wrap=0 "$test_dir/wallet.zip")" \
             ./docker-entrypoint.sh
           ./mvnw -B test
 
@@ -108,3 +105,134 @@ jobs:
           tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy API image to ECS
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION: us-east-1
+      AWS_ACCOUNT_ID: "622519216316"
+      ECS_CLUSTER: pet-app-angular21-cluster
+      ECR_REPOSITORY: pet-api-oracle
+      CLOUDFORMATION_STACK: pet-api-http
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS account and published image
+        shell: bash
+        run: |
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$account_id" != "$AWS_ACCOUNT_ID" ]]; then
+            echo "::error::The configured AWS credentials point to account $account_id, not $AWS_ACCOUNT_ID."
+            exit 1
+          fi
+
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$GITHUB_SHA" \
+            --region "$AWS_REGION" >/dev/null
+
+      - name: Resolve ECS service and API URL
+        shell: bash
+        run: |
+          if ! stack_outputs="$(aws cloudformation describe-stacks \
+            --stack-name "$CLOUDFORMATION_STACK" \
+            --region "$AWS_REGION" \
+            --query 'Stacks[0].Outputs' --output json 2>&1)"; then
+            if [[ "$stack_outputs" == *"does not exist"* ]]; then
+              echo "ECS_SERVICE=" >> "$GITHUB_ENV"
+              echo "::notice::The ECS stack is not created yet. The image was published and can be used by the initial deployment."
+              exit 0
+            fi
+            echo "::error::The API ECS stack is not available. Run Deploy Pet API to ECS in the frontend repository once to create it."
+            echo "$stack_outputs"
+            exit 1
+          fi
+
+          service_name="$(jq -r '.[] | select(.OutputKey == "ApiServiceName") | .OutputValue' <<< "$stack_outputs")"
+          api_url="$(jq -r '.[] | select(.OutputKey == "ApiBaseUrl") | .OutputValue' <<< "$stack_outputs")"
+          if [[ -z "$service_name" || "$service_name" == "null" || -z "$api_url" || "$api_url" == "null" ]]; then
+            echo "::error::CloudFormation stack $CLOUDFORMATION_STACK is missing ApiServiceName or ApiBaseUrl outputs."
+            exit 1
+          fi
+
+          {
+            echo "ECS_SERVICE=$service_name"
+            echo "API_BASE_URL=$api_url"
+          } >> "$GITHUB_ENV"
+
+      - name: Register task definition with the new image
+        if: env.ECS_SERVICE != ''
+        shell: bash
+        run: |
+          service="$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" \
+            --output json)"
+          if [[ "$(jq -r '.failures | length' <<< "$service")" != "0" \
+            || "$(jq -r '.services | length' <<< "$service")" != "1" \
+            || "$(jq -r '.services[0].status' <<< "$service")" != "ACTIVE" ]]; then
+            echo "::error::ECS service $ECS_SERVICE is missing or not ACTIVE in cluster $ECS_CLUSTER."
+            exit 1
+          fi
+
+          current_task_definition="$(jq -r '.services[0].taskDefinition' <<< "$service")"
+          image="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$GITHUB_SHA"
+          task_definition_file="$RUNNER_TEMP/task-definition.json"
+          aws ecs describe-task-definition \
+            --task-definition "$current_task_definition" \
+            --region "$AWS_REGION" \
+            --query taskDefinition --output json \
+            | jq --arg image "$image" '
+                if ([.containerDefinitions[] | select(.name == "pet-api")] | length) != 1 then
+                  error("Expected exactly one pet-api container in the current task definition")
+                else
+                  .containerDefinitions |= map(
+                    if .name == "pet-api" then .image = $image else . end
+                  )
+                  | del(
+                      .taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy
+                    )
+                end
+              ' > "$task_definition_file"
+
+          task_definition_arn="$(aws ecs register-task-definition \
+            --cli-input-json "file://$task_definition_file" \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)"
+          echo "TASK_DEFINITION_ARN=$task_definition_arn" >> "$GITHUB_ENV"
+
+      - name: Update ECS service
+        if: env.ECS_SERVICE != ''
+        shell: bash
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --region "$AWS_REGION" >/dev/null
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION"
+
+      - name: Smoke-test the API
+        if: env.ECS_SERVICE != ''
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --retry 5 --retry-delay 10 \
+            "$API_BASE_URL/pets" --output "$RUNNER_TEMP/pets-response.json"
+          jq -e 'type == "array"' "$RUNNER_TEMP/pets-response.json" >/dev/null
+          echo "API smoke test passed: GET /pets returned a JSON array."
