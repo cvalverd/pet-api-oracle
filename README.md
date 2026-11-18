@@ -84,43 +84,48 @@ La API queda en `http://localhost:8080/pets`. Luego levanta el frontend Angular 
 Las pruebas de controller, service, modelo y extracción segura de la wallet no necesitan una base de
 datos Oracle ni acceso a AWS.
 
-## Publicar la imagen en Amazon ECR
+## Publicar y desplegar la API en EC2
 
-El workflow de GitHub Actions `.github/workflows/publish-ecr.yml` ejecuta las pruebas y, al hacer
-push a `main` (o iniciarlo manualmente en esa rama), construye la imagen Docker y la publica en
-`622519216316.dkr.ecr.us-east-1.amazonaws.com/pet-api-oracle` con el SHA del commit como etiqueta.
-La primera ejecución crea el repositorio ECR si aún no existe.
+El workflow `.github/workflows/publish-ecr.yml` ejecuta `./mvnw -B test`, construye y publica la
+imagen de la API en ECR con el SHA del commit como etiqueta inmutable y, al hacer push a `main`,
+actualiza el contenedor `pet-api` de EC2 mediante AWS Systems Manager (SSM). Si el mismo SHA ya está
+publicado, reutiliza la imagen. Antes de terminar, consulta `GET /pets` y revierte al contenedor
+anterior si la API o Oracle no responden.
 
-Configura en **Settings → Secrets and variables → Actions** de este repositorio los secretos
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` y `AWS_SESSION_TOKEN`. Los secretos del repositorio del
-frontend no se comparten automáticamente. Como las credenciales de AWS Academy expiran, actualiza
-los tres secretos cada vez que roten.
+Prepara primero la infraestructura EC2 con la plantilla
+[`ec2/pet-app-ec2-stack.yml` del repositorio frontend](https://github.com/cvalverd/pet-app-angular21/blob/main/ec2/pet-app-ec2-stack.yml).
+La instancia necesita un perfil IAM con Systems Manager, lectura de ECR, permiso de lectura del
+secreto Oracle y `s3:GetObject` para el ZIP privado del wallet. En AWS Academy se usa el perfil
+existente; en una cuenta propia, la plantilla puede crear un rol mínimo. La base Oracle, el secreto y
+el objeto del wallet son recursos externos y deben existir antes del primer despliegue.
 
-Después de publicar la imagen, el workflow registra una nueva revisión de la tarea y actualiza
-automáticamente el servicio ECS `pet-api` cuando se ejecuta en `main`. El stack debe existir antes:
-si es el primer despliegue, ejecuta una vez **Deploy Pet API to ECS** en el repositorio del frontend.
-La API requiere el wallet de Oracle y las variables `DB_URL`, `DB_USERNAME` y `DB_PASSWORD` en
-tiempo de ejecución. ECS inyecta las credenciales desde Secrets Manager. Antes de iniciar Spring,
-la aplicación descarga el ZIP privado de S3 mediante el AWS SDK para Java y el task role de ECS,
-valida que contenga `tnsnames.ora` en la raíz y lo extrae en `/app/wallet`. Spring Boot aplica las
-migraciones Flyway antes de inicializar JPA para crear `PET` e insertar los datos de demostracion.
-La variable
-`ORACLE_WALLET_S3_BUCKET` identifica el bucket y `ORACLE_WALLET_S3_KEY` el objeto; no se usan
-credenciales AWS estáticas ni valores Base64. En ejecución local, Docker Compose conserva el montaje
-de `./wallet` y no descarga desde S3 si esas variables no están configuradas.
+En **Settings → Secrets and variables → Actions** de este repositorio configura estos **Secrets**:
 
-El primer despliegue crea la infraestructura desde el workflow manual **Deploy Pet API to ECS** en el
-repositorio del frontend. Este requiere el secreto `pet-api/oracle-db-credentials` (JSON con
-`DB_URL`, `DB_USERNAME` y `DB_PASSWORD`) en Secrets Manager, y las variables Actions
-`ORACLE_WALLET_S3_BUCKET=pet-api-oracle-wallet-622519216316-us-east-1-an` y
-`ORACLE_WALLET_S3_KEY=Wallet_BTJOWHCMGWJBQTNV.zip`. La tarea usa `LabRole` tanto como execution role
-como task role porque AWS Academy no permite crear roles. La confianza de `LabRole` incluye ECS Tasks
-y la simulación IAM actual permite `s3:GetObject` sobre el objeto configurado; el rol es compartido y
-sus permisos no son de mínimo privilegio para producción. La wallet no se almacena en Secrets Manager
-ni se incluye en la imagen. La plantilla no incluye valores secretos y el preflight comprueba permisos
-sin leer credenciales ni el objeto wallet.
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_SESSION_TOKEN`
 
-El workflow verifica la existencia del objeto y el permiso antes de desplegar. Después, cada
-publicación exitosa desde `main` actualiza el servicio existente y comprueba `GET /pets`. El endpoint
-actual es HTTP público, sin autenticación ni cifrado en tránsito; úsalo solo para la demo, nunca con
-datos reales o sensibles.
+Y estas **Variables**:
+
+- `AWS_REGION` (opcional; predeterminado `us-east-1`)
+- `EC2_INSTANCE_ID`
+- `ORACLE_CREDENTIALS_SECRET_ARN`
+- `ORACLE_WALLET_S3_BUCKET`
+- `ORACLE_WALLET_S3_KEY`
+
+Los tres secretos AWS son independientes de los del repositorio frontend; las credenciales de AWS
+Academy expiran y deben renovarse. Los valores de base de datos no se configuran en GitHub: el script
+de despliegue los obtiene de Secrets Manager dentro de EC2 y los inyecta al contenedor. El wallet
+permanece en S3 y no se agrega a la imagen.
+
+Las credenciales de GitHub Actions necesitan acceso a ECR, `ssm:SendCommand`,
+`ssm:GetCommandInvocation` y `ec2:DescribeInstances`. Para probar el despliegue inicial, ejecuta
+primero el workflow del backend en `main` para iniciar la API; luego ejecuta el workflow frontend.
+`workflow_dispatch` desde otra rama permite publicar una imagen, pero el despliegue a EC2 solo corre
+desde `main`.
+
+El workflow **Deploy Pet API to ECS** del repositorio frontend es una ruta legacy separada y no
+actualiza EC2. No la ejecutes para esta demo.
+
+El endpoint EC2 es HTTP público, sin autenticación ni cifrado en tránsito; úsalo solo para la demo,
+nunca con datos reales o sensibles.

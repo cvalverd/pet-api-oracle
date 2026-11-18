@@ -1,4 +1,4 @@
-name: Publish backend container to Amazon ECR
+name: Test, publish and deploy API to EC2
 
 on:
   workflow_dispatch:
@@ -10,19 +10,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-backend-ecr
+  group: publish-api-ecr
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: Test, build and publish API image
+    name: Test and publish API image
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      AWS_REGION: us-east-1
-      AWS_ACCOUNT_ID: "622519216316"
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
       ECR_REPOSITORY: pet-api-oracle
+
+    outputs:
+      image: ${{ steps.image-reference.outputs.image }}
 
     steps:
       - name: Check out source
@@ -32,7 +34,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: '21'
           cache: maven
 
       - name: Run tests
@@ -50,8 +52,7 @@ jobs:
           test "$2" = "/app/pet-api.jar"
           EOF
           chmod +x "$test_dir/bin/java"
-          PATH="$test_dir/bin:$PATH" \
-            ./docker-entrypoint.sh
+          PATH="$test_dir/bin:$PATH" ./docker-entrypoint.sh
           ./mvnw -B test
 
       - name: Configure AWS credentials
@@ -62,14 +63,15 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify Academy account and ECR repository
+      - name: Verify AWS account and create ECR repository if needed
         shell: bash
         run: |
           account_id="$(aws sts get-caller-identity --query Account --output text)"
-          if [[ "$account_id" != "$AWS_ACCOUNT_ID" ]]; then
-            echo "::error::The configured AWS credentials point to account $account_id, not $AWS_ACCOUNT_ID."
+          if [[ ! "$account_id" =~ ^[0-9]{12}$ ]]; then
+            echo "::error::Could not determine the AWS account ID."
             exit 1
           fi
+          echo "AWS_ACCOUNT_ID=$account_id" >> "$GITHUB_ENV"
 
           if ! repositories="$(aws ecr describe-repositories \
             --repository-names "$ECR_REPOSITORY" \
@@ -78,25 +80,41 @@ jobs:
               echo "$repositories"
               exit 1
             fi
-
             aws ecr create-repository \
               --repository-name "$ECR_REPOSITORY" \
               --image-tag-mutability IMMUTABLE \
               --image-scanning-configuration scanOnPush=true \
               --encryption-configuration encryptionType=AES256 \
               --region "$AWS_REGION"
-          else
-            echo "$repositories"
           fi
 
       - name: Log in to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Check whether the immutable image already exists
+        id: existing-image
+        shell: bash
+        run: |
+          if image="$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$GITHUB_SHA" \
+            --region "$AWS_REGION" 2>&1)"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image for this commit already exists; it will be reused."
+          elif [[ "$image" == *"ImageNotFoundException"* ]]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$image" >&2
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
+        if: steps.existing-image.outputs.exists != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push API image
+        if: steps.existing-image.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -106,20 +124,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    name: Deploy API image to ECS
+      - name: Export image reference
+        id: image-reference
+        shell: bash
+        run: |
+          echo "image=${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+  deploy-ec2:
+    name: Deploy API to EC2 through Systems Manager
     needs: publish
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    concurrency:
+      group: pet-api-ec2-deployment
+      cancel-in-progress: false
     env:
-      AWS_REGION: us-east-1
-      AWS_ACCOUNT_ID: "622519216316"
-      ECS_CLUSTER: pet-app-angular21-cluster
-      ECR_REPOSITORY: pet-api-oracle
-      CLOUDFORMATION_STACK: pet-api-http
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+      ORACLE_CREDENTIALS_SECRET_ARN: ${{ vars.ORACLE_CREDENTIALS_SECRET_ARN }}
+      ORACLE_WALLET_S3_BUCKET: ${{ vars.ORACLE_WALLET_S3_BUCKET }}
+      ORACLE_WALLET_S3_KEY: ${{ vars.ORACLE_WALLET_S3_KEY }}
+      IMAGE_URI: ${{ needs.publish.outputs.image }}
 
     steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
@@ -128,111 +159,33 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify AWS account and published image
+      - name: Verify EC2 and Oracle resource identifiers
         shell: bash
         run: |
-          account_id="$(aws sts get-caller-identity --query Account --output text)"
-          if [[ "$account_id" != "$AWS_ACCOUNT_ID" ]]; then
-            echo "::error::The configured AWS credentials point to account $account_id, not $AWS_ACCOUNT_ID."
+          if [[ ! "$EC2_INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]]; then
+            echo "::error::Set the EC2_INSTANCE_ID Actions variable to the managed EC2 instance ID."
+            exit 1
+          fi
+          if [[ ! "$ORACLE_CREDENTIALS_SECRET_ARN" =~ ^arn:aws:secretsmanager:${AWS_REGION}:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$ ]]; then
+            echo "::error::Set ORACLE_CREDENTIALS_SECRET_ARN to the secret ARN in Actions Variables."
+            exit 1
+          fi
+          if [[ ! "$ORACLE_WALLET_S3_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ \
+            || ! "$ORACLE_WALLET_S3_KEY" =~ ^[A-Za-z0-9._/-]{1,1024}$ ]]; then
+            echo "::error::Set ORACLE_WALLET_S3_BUCKET and ORACLE_WALLET_S3_KEY in Actions Variables."
             exit 1
           fi
 
-          aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --image-ids "imageTag=$GITHUB_SHA" \
-            --region "$AWS_REGION" >/dev/null
-
-      - name: Resolve ECS service and API URL
+      - name: Deploy image and smoke-test the EC2 website
         shell: bash
-        run: |
-          if ! stack_outputs="$(aws cloudformation describe-stacks \
-            --stack-name "$CLOUDFORMATION_STACK" \
-            --region "$AWS_REGION" \
-            --query 'Stacks[0].Outputs' --output json 2>&1)"; then
-            if [[ "$stack_outputs" == *"does not exist"* ]]; then
-              echo "ECS_SERVICE=" >> "$GITHUB_ENV"
-              echo "::notice::The ECS stack is not created yet. The image was published and can be used by the initial deployment."
-              exit 0
-            fi
-            echo "::error::The API ECS stack is not available. Run Deploy Pet API to ECS in the frontend repository once to create it."
-            echo "$stack_outputs"
-            exit 1
-          fi
-
-          service_name="$(jq -r '.[] | select(.OutputKey == "ApiServiceName") | .OutputValue' <<< "$stack_outputs")"
-          api_url="$(jq -r '.[] | select(.OutputKey == "ApiBaseUrl") | .OutputValue' <<< "$stack_outputs")"
-          if [[ -z "$service_name" || "$service_name" == "null" || -z "$api_url" || "$api_url" == "null" ]]; then
-            echo "::error::CloudFormation stack $CLOUDFORMATION_STACK is missing ApiServiceName or ApiBaseUrl outputs."
-            exit 1
-          fi
-
-          {
-            echo "ECS_SERVICE=$service_name"
-            echo "API_BASE_URL=$api_url"
-          } >> "$GITHUB_ENV"
-
-      - name: Register task definition with the new image
-        if: env.ECS_SERVICE != ''
-        shell: bash
-        run: |
-          service="$(aws ecs describe-services \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --region "$AWS_REGION" \
-            --output json)"
-          if [[ "$(jq -r '.failures | length' <<< "$service")" != "0" \
-            || "$(jq -r '.services | length' <<< "$service")" != "1" \
-            || "$(jq -r '.services[0].status' <<< "$service")" != "ACTIVE" ]]; then
-            echo "::error::ECS service $ECS_SERVICE is missing or not ACTIVE in cluster $ECS_CLUSTER."
-            exit 1
-          fi
-
-          current_task_definition="$(jq -r '.services[0].taskDefinition' <<< "$service")"
-          image="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$GITHUB_SHA"
-          task_definition_file="$RUNNER_TEMP/task-definition.json"
-          aws ecs describe-task-definition \
-            --task-definition "$current_task_definition" \
-            --region "$AWS_REGION" \
-            --query taskDefinition --output json \
-            | jq --arg image "$image" '
-                if ([.containerDefinitions[] | select(.name == "pet-api")] | length) != 1 then
-                  error("Expected exactly one pet-api container in the current task definition")
-                else
-                  .containerDefinitions |= map(
-                    if .name == "pet-api" then .image = $image else . end
-                  )
-                  | del(
-                      .taskDefinitionArn, .revision, .status, .requiresAttributes,
-                      .compatibilities, .registeredAt, .registeredBy
-                    )
-                end
-              ' > "$task_definition_file"
-
-          task_definition_arn="$(aws ecs register-task-definition \
-            --cli-input-json "file://$task_definition_file" \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition.taskDefinitionArn' --output text)"
-          echo "TASK_DEFINITION_ARN=$task_definition_arn" >> "$GITHUB_ENV"
-
-      - name: Update ECS service
-        if: env.ECS_SERVICE != ''
-        shell: bash
-        run: |
-          aws ecs update-service \
-            --cluster "$ECS_CLUSTER" \
-            --service "$ECS_SERVICE" \
-            --task-definition "$TASK_DEFINITION_ARN" \
-            --region "$AWS_REGION" >/dev/null
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --region "$AWS_REGION"
-
-      - name: Smoke-test the API
-        if: env.ECS_SERVICE != ''
-        shell: bash
-        run: |
-          curl --fail --silent --show-error --retry 5 --retry-delay 10 \
-            "$API_BASE_URL/pets" --output "$RUNNER_TEMP/pets-response.json"
-          jq -e 'type == "array"' "$RUNNER_TEMP/pets-response.json" >/dev/null
-          echo "API smoke test passed: GET /pets returned a JSON array."
+        run: >-
+          bash ec2/deploy-to-instance.sh
+          "$EC2_INSTANCE_ID"
+          "$AWS_REGION"
+          api
+          ec2/deploy-api.sh
+          "$IMAGE_URI"
+          "$AWS_REGION"
+          "$ORACLE_CREDENTIALS_SECRET_ARN"
+          "$ORACLE_WALLET_S3_BUCKET"
+          "$ORACLE_WALLET_S3_KEY"
